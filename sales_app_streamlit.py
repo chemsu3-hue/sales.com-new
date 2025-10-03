@@ -3,42 +3,97 @@ import pandas as pd
 import os
 from datetime import date, datetime
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 
+# =========================
+# Config
+# =========================
 EXCEL_FILE = "mimamuni sales datta+.xlsx"
-RAW_SHEET = "Sheet1"
+RAW_SHEET = "Sheet1"     # donde está tu tabla principal de ventas
+CAT_SHEET = "Catalogo"   # hoja nueva para guardar Artículo/Precio de forma persistente
 
-# Quick tiles: name -> price (edit or add more)
-DEFAULT_CATALOG = {
-    "bolsa": 120.0,
-    "jeans": 50.0,
-    "t-shirt": 25.0,
-    "jacket": 120.0,
-    "cinturón": 20.0,
-}
+# Catálogo por defecto si no existe aún en el Excel
+DEFAULT_CATALOG = [
+    {"Artículo": "bolsa", "Precio": 120.0},
+    {"Artículo": "jeans", "Precio": 50.0},
+    {"Artículo": "t-shirt", "Precio": 25.0},
+    {"Artículo": "jacket", "Precio": 120.0},
+    {"Artículo": "cinturón", "Precio": 20.0},
+]
 
-st.set_page_config(page_title="Ventas - Tienda de Ropa", page_icon="🛍️", layout="centered")
-st.title("🛍️ Registro de Ventas")
-st.caption("Sube tu Excel. Cada venta se añade en la tabla principal de Sheet1.")
-
-# ----------------- helpers for Sheet1 table -----------------
 EXPECTED = ["Fecha","Cantidad","Nombre del Artículo","Método de Pago","Precio Unitario","Venta Total","Comentarios"]
 
+st.set_page_config(page_title="Ventas - Tienda de Ropa", page_icon="🛍️", layout="wide")
+st.title("🛍️ Registro de Ventas")
+st.caption("El catálogo se guarda en la hoja 'Catalogo' del mismo Excel. Las ventas se agregan a la tabla de Sheet1.")
+
+# ----------------- utilidades Excel -----------------
 def ensure_excel_exists() -> bool:
     return os.path.exists(EXCEL_FILE)
 
+def open_wb():
+    if not ensure_excel_exists():
+        raise FileNotFoundError("Excel no encontrado. Sube tu archivo primero.")
+    return load_workbook(EXCEL_FILE)
+
+def write_sheet_replace(df: pd.DataFrame, sheet_name: str):
+    """Reemplaza completamente una hoja por el contenido de df (creándola si no existe)."""
+    wb = open_wb()
+    from openpyxl.utils.dataframe import dataframe_to_rows
+
+    # Si existe, elimínala para escribir limpia
+    if sheet_name in wb.sheetnames:
+        ws_old = wb[sheet_name]
+        wb.remove(ws_old)
+    ws = wb.create_sheet(sheet_name)
+
+    # Escribir encabezados + filas
+    for r in dataframe_to_rows(df, index=False, header=True):
+        ws.append(r)
+
+    wb.save(EXCEL_FILE)
+
+def load_catalog_df() -> pd.DataFrame:
+    """Carga el catálogo desde la hoja Catalogo; si no existe, lo crea por defecto."""
+    if not ensure_excel_exists():
+        # Excel aún no subido: devolver df vacío con columnas correctas
+        return pd.DataFrame(DEFAULT_CATALOG, columns=["Artículo","Precio"])
+    try:
+        df = pd.read_excel(EXCEL_FILE, sheet_name=CAT_SHEET)
+        # normalizar columnas
+        df = df.rename(columns={"Articulo":"Artículo","precio":"Precio"})
+        # forzar tipos
+        if "Artículo" not in df.columns or "Precio" not in df.columns:
+            df = pd.DataFrame(DEFAULT_CATALOG, columns=["Artículo","Precio"])
+        df["Artículo"] = df["Artículo"].astype(str)
+        df["Precio"] = pd.to_numeric(df["Precio"], errors="coerce").fillna(0.0)
+        return df[["Artículo","Precio"]]
+    except Exception:
+        # crear por primera vez
+        df = pd.DataFrame(DEFAULT_CATALOG, columns=["Artículo","Precio"])
+        try:
+            write_sheet_replace(df, CAT_SHEET)
+        except Exception:
+            pass
+        return df
+
+def save_catalog_df(df: pd.DataFrame):
+    """Guarda el catálogo (limpio, sin duplicados vacíos) en la hoja Catalogo."""
+    clean = df.copy()
+    clean["Artículo"] = clean["Artículo"].astype(str).str.strip()
+    clean["Precio"] = pd.to_numeric(clean["Precio"], errors="coerce").fillna(0.0)
+    # eliminar filas totalmente vacías
+    clean = clean[clean["Artículo"] != ""]
+    # opcional: dejar solo la última ocurrencia por nombre
+    clean = clean.drop_duplicates(subset=["Artículo"], keep="last")
+    write_sheet_replace(clean[["Artículo","Precio"]], CAT_SHEET)
+
+# ---- detectar cabeceras en Sheet1 y añadir venta debajo ----
 def find_header_row_and_map(ws):
-    """
-    Find the row in Sheet1 that contains the headers (Fecha, Cantidad, Nombre del Artículo...).
-    Return (header_row_index, {header_name: column_index})
-    """
-    # scan first ~200 rows/columns to find a row that contains the 3 core headers
     max_rows = min(ws.max_row, 200)
     max_cols = min(ws.max_column, 30)
     for r in range(1, max_rows+1):
-        values = [str(ws.cell(r, c).value).strip() if ws.cell(r, c).value is not None else "" for c in range(1, max_cols+1)]
-        if {"Fecha","Cantidad","Nombre del Artículo"}.issubset(set(values)):
-            # build header->col map
+        vals = [str(ws.cell(r, c).value).strip() if ws.cell(r,c).value is not None else "" for c in range(1, max_cols+1)]
+        if {"Fecha","Cantidad","Nombre del Artículo"}.issubset(set(vals)):
             col_map = {}
             for c in range(1, max_cols+1):
                 val = ws.cell(r, c).value
@@ -49,18 +104,12 @@ def find_header_row_and_map(ws):
             return r, col_map
     return None, {}
 
-def find_next_empty_data_row(ws, header_row, key_col):
-    """
-    Starting from the row after header_row, find the first 'empty' row based on key_col (e.g., Fecha or Cantidad).
-    If key_col is missing, fall back to scanning until a block of empties appears, else ws.max_row + 1.
-    """
+def find_next_empty_data_row(ws, header_row, key_cols):
     start = header_row + 1
-    # If the sheet has totals or other blocks below, we still append at the first empty line we find.
-    # We'll define "empty" as all Expected columns empty in that row.
     r = start
     while r <= ws.max_row:
         empty = True
-        for name, col in key_col.items():
+        for col in key_cols.values():
             if ws.cell(r, col).value not in (None, ""):
                 empty = False
                 break
@@ -70,93 +119,45 @@ def find_next_empty_data_row(ws, header_row, key_col):
     return ws.max_row + 1
 
 def append_sale_to_sheet1(row_dict):
-    """
-    Append one sale row into the detected table on Sheet1.
-    """
-    if not ensure_excel_exists():
-        raise FileNotFoundError("Excel no encontrado. Sube tu archivo primero.")
-
-    wb = load_workbook(EXCEL_FILE)
+    wb = open_wb()
     if RAW_SHEET not in wb.sheetnames:
         raise ValueError(f"No se encontró la hoja {RAW_SHEET}.")
-
     ws = wb[RAW_SHEET]
+
     header_row, col_map = find_header_row_and_map(ws)
     if not header_row:
         raise RuntimeError("No se encontraron las cabeceras (Fecha/Cantidad/Nombre del Artículo) en Sheet1.")
 
-    # Build a dict of columns that we will write (only ones that exist)
-    write_cols = {k: v for k, v in col_map.items() if k in EXPECTED}
-
-    # For 'Venta Total' default to Cantidad * Precio Unitario if missing
-    if ("Venta Total" in write_cols) and (("Venta Total" not in row_dict) or (row_dict["Venta Total"] in (None, ""))):
+    # calcular Venta Total si falta
+    if "Venta Total" in col_map and (("Venta Total" not in row_dict) or row_dict["Venta Total"] in (None, "")):
         try:
             row_dict["Venta Total"] = float(row_dict.get("Cantidad", 0)) * float(row_dict.get("Precio Unitario", 0))
         except Exception:
             row_dict["Venta Total"] = None
 
-    # Decide which columns to test for emptiness to find the next row
-    key_cols_for_empty = {k: write_cols[k] for k in write_cols if k in ["Fecha","Cantidad","Nombre del Artículo"]}
-    if not key_cols_for_empty:
-        key_cols_for_empty = write_cols  # fallback
+    key_cols = {k: col_map[k] for k in col_map if k in ["Fecha","Cantidad","Nombre del Artículo"]}
+    if not key_cols:
+        key_cols = col_map
+    next_row = find_next_empty_data_row(ws, header_row, key_cols)
 
-    next_row = find_next_empty_data_row(ws, header_row, key_cols_for_empty)
-
-    # Write values
-    for header, col_idx in write_cols.items():
-        val = row_dict.get(header, None)
-        if header == "Fecha" and isinstance(val, (date, datetime)):
-            ws.cell(next_row, col_idx).value = datetime.combine(val, datetime.min.time())
+    for h, c in col_map.items():
+        val = row_dict.get(h, None)
+        if h == "Fecha" and isinstance(val, (date, datetime)):
+            ws.cell(next_row, c).value = datetime.combine(val, datetime.min.time())
         else:
-            ws.cell(next_row, col_idx).value = val
+            ws.cell(next_row, c).value = val
 
     wb.save(EXCEL_FILE)
 
-@st.cache_data(show_spinner=False)
-def read_current_table_as_df():
-    if not ensure_excel_exists():
-        return pd.DataFrame(columns=EXPECTED)
-    try:
-        # read Sheet1 as a dataframe by detecting header row
-        from openpyxl import load_workbook
-        wb = load_workbook(EXCEL_FILE, data_only=True)
-        ws = wb[RAW_SHEET]
-        header_row, col_map = find_header_row_and_map(ws)
-        if not header_row:
-            return pd.DataFrame(columns=EXPECTED)
-        # build records until first empty block
-        records = []
-        r = header_row + 1
-        while r <= ws.max_row:
-            # Stop if row is completely empty across the expected cols
-            if all(ws.cell(r, col_map.get(h, 0)).value in (None, "") for h in col_map):
-                break
-            rec = {}
-            for name, col in col_map.items():
-                rec[name] = ws.cell(r, col).value
-            records.append(rec)
-            r += 1
-        df = pd.DataFrame(records)
-        # Normalize types
-        if "Fecha" in df.columns:
-            df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce").dt.date
-        for c in ["Cantidad", "Precio Unitario", "Venta Total"]:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-        for c in EXPECTED:
-            if c not in df.columns:
-                df[c] = None
-        return df[EXPECTED]
-    except Exception:
-        return pd.DataFrame(columns=EXPECTED)
-
-# ----------------- Upload / Download -----------------
-st.subheader("📂 Tu archivo Excel (principal)")
-uploaded = st.file_uploader("Sube tu Excel (.xlsx). El app escribirá en la tabla de Sheet1.", type=["xlsx"])
+# =========================
+# Subir/descargar Excel
+# =========================
+st.subheader("📂 Tu archivo Excel")
+uploaded = st.file_uploader("Sube tu Excel (.xlsx). Se usará la tabla de 'Sheet1' y se guardará el catálogo en 'Catalogo'.", type=["xlsx"])
 if uploaded is not None:
     with open(EXCEL_FILE, "wb") as f:
         f.write(uploaded.getbuffer())
-    st.success("Excel guardado. (Consejo: guarda una copia de seguridad también).")
+    st.success("Excel guardado.")
     st.cache_data.clear()
 
 if ensure_excel_exists():
@@ -165,59 +166,87 @@ if ensure_excel_exists():
 else:
     st.info("Aún no has subido el archivo.")
 
-# ----------------- Sidebar: catalog tiles config -----------------
-if "catalog" not in st.session_state:
-    st.session_state.catalog = DEFAULT_CATALOG.copy()
-with st.sidebar:
-    st.header("🗂️ Catálogo de artículos")
-    with st.form("add_item"):
-        n = st.text_input("Artículo", placeholder="bolsa")
-        p = st.number_input("Precio", min_value=0.0, step=1.0, value=0.0, format="%.2f")
-        ok = st.form_submit_button("Agregar/Actualizar")
-        if ok and n.strip():
-            st.session_state.catalog[n.strip()] = float(p)
-            st.success(f"Guardado: {n.strip()} → {p:.2f}")
-    if st.session_state.catalog:
-        st.dataframe(pd.DataFrame(sorted(st.session_state.catalog.items()), columns=["Artículo","Precio"]), hide_index=True, use_container_width=True)
+# =========================
+# Catálogo: CRUD persistente
+# =========================
+st.divider()
+st.subheader("🗂️ Catálogo de Artículo y Precio (se guarda en la hoja 'Catalogo')")
+catalog_df = load_catalog_df()
 
-# ----------------- Preview current table -----------------
-df = read_current_table_as_df()
-with st.expander("📊 Ver datos actuales (Sheet1)", expanded=False):
-    st.dataframe(df, use_container_width=True)
+# Agregar columna "Eliminar" para marcar filas a borrar en la UI (no se guarda)
+if "Eliminar" not in catalog_df.columns:
+    catalog_df["Eliminar"] = False
 
-# ----------------- Tiles -----------------
-if "articulo" not in st.session_state: st.session_state.articulo = ""
-if "precio_unit" not in st.session_state: st.session_state.precio_unit = 0.0
+edited_df = st.data_editor(
+    catalog_df,
+    num_rows="dynamic",           # permite añadir filas vacías desde la UI
+    use_container_width=True,
+    column_config={
+        "Artículo": st.column_config.TextColumn(required=True),
+        "Precio": st.column_config.NumberColumn(min_value=0.0, step=1.0, format="%.2f"),
+        "Eliminar": st.column_config.CheckboxColumn(help="Marca para borrar esta fila"),
+    },
+    hide_index=True,
+    key="catalog_editor"
+)
+
+colA, colB, colC = st.columns([1,1,2])
+with colA:
+    if st.button("💾 Guardar catálogo"):
+        # borrar marcadas y guardar
+        to_save = edited_df.copy()
+        if "Eliminar" in to_save.columns:
+            to_save = to_save[to_save["Eliminar"] == False].drop(columns=["Eliminar"])
+        save_catalog_df(to_save)
+        st.success("Catálogo guardado en la hoja 'Catalogo'.")
+with colB:
+    if st.button("↩️ Deshacer cambios (recargar)"):
+        st.cache_data.clear()
+        st.rerun()
+
+# =========================
+# Cuadrados (tiles) desde el catálogo guardado
+# =========================
+tiles_df = edited_df.copy()
+if "Eliminar" in tiles_df.columns:
+    tiles_df = tiles_df[tiles_df["Eliminar"] == False]
+tiles_df = tiles_df.dropna(subset=["Artículo"])
+tiles_df["Precio"] = pd.to_numeric(tiles_df["Precio"], errors="coerce").fillna(0.0)
+
+if "articulo_sel" not in st.session_state: st.session_state.articulo_sel = ""
+if "precio_sel" not in st.session_state: st.session_state.precio_sel = 0.0
 
 st.subheader("🧱 Elige un artículo")
-cols_per_row = 3
-items = list(st.session_state.catalog.items())
+cols_per_row = 4
+items = list(tiles_df[["Artículo","Precio"]].itertuples(index=False, name=None))
 for i in range(0, len(items), cols_per_row):
     cols = st.columns(cols_per_row)
     for col, (name, price) in zip(cols, items[i:i+cols_per_row]):
         with col:
-            if st.button(f"{name}\n${price:.2f}", key=f"tile_{name}", use_container_width=True):
-                st.session_state.articulo = name
-                st.session_state.precio_unit = float(price)
+            if st.button(f"{name}\n${float(price):.2f}", key=f"tile_{name}", use_container_width=True):
+                st.session_state.articulo_sel = name
+                st.session_state.precio_sel = float(price)
 
+# =========================
+# Formulario de venta -> Sheet1
+# =========================
 st.divider()
+st.subheader("➕ Añadir venta a la tabla de Sheet1")
 
-# ----------------- Entry form -----------------
-st.subheader("➕ Añadir una venta a Sheet1")
 c1, c2 = st.columns(2)
 with c1:
     fecha = st.date_input("Fecha", value=date.today())
     cantidad = st.number_input("Cantidad", min_value=1, step=1, value=1)
-    articulo = st.text_input("Nombre del Artículo", value=st.session_state.articulo)
+    articulo = st.text_input("Nombre del Artículo", value=st.session_state.articulo_sel)
 with c2:
     metodo = st.radio("Método de Pago", ["E", "T"], horizontal=True, help="E=Efectivo, T=Tarjeta")
-    precio_unit = st.number_input("Precio Unitario", min_value=0.0, step=1.0, value=float(st.session_state.precio_unit), format="%.2f")
+    precio_unit = st.number_input("Precio Unitario", min_value=0.0, step=1.0, value=float(st.session_state.precio_sel), format="%.2f")
     venta_total = st.number_input("Venta Total (auto)", min_value=0.0, step=1.0, value=float(cantidad)*float(precio_unit), format="%.2f")
 
 comentarios = st.text_area("Comentarios (opcional)", value="")
 
 disabled = (not ensure_excel_exists()) or (not articulo) or (precio_unit <= 0)
-if st.button("Guardar en la tabla de Sheet1", type="primary", use_container_width=True, disabled=disabled):
+if st.button("Guardar en Sheet1", type="primary", use_container_width=True, disabled=disabled):
     try:
         append_sale_to_sheet1({
             "Fecha": fecha,
@@ -226,14 +255,15 @@ if st.button("Guardar en la tabla de Sheet1", type="primary", use_container_widt
             "Método de Pago": metodo,
             "Precio Unitario": float(precio_unit),
             "Venta Total": float(venta_total),
-            "Comentarios": comentarios.strip() or None,
+            "Comentarios": (comentarios or "").strip() or None,
         })
-        st.success("✅ Venta añadida en la tabla principal de Sheet1.")
-        st.session_state.articulo = ""
-        st.session_state.precio_unit = 0.0
+        st.success("✅ Venta agregada en la tabla principal de Sheet1.")
+        # limpiar selección para el siguiente registro
+        st.session_state.articulo_sel = ""
+        st.session_state.precio_sel = 0.0
         st.cache_data.clear()
         st.rerun()
     except Exception as e:
         st.error(f"No se pudo escribir en Sheet1: {e}")
 
-st.caption("El app detecta la fila de cabeceras en Sheet1 y escribe nuevas filas debajo sin tocar otras celdas del dashboard.")
+st.caption("En 'Catálogo de Artículo y Precio' puedes añadir, editar o borrar entradas y luego pulsa 'Guardar catálogo'.")
