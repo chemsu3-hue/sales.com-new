@@ -1,16 +1,21 @@
-# sales_app_streamlit.py — robusto: catálogo + escritura en Sheet1 con override de cabeceras
+# sales_app_streamlit.py — tiles fill the form + force "Nombre del Artículo" to column D
 import streamlit as st
 import pandas as pd
 import os, unicodedata, re
 from datetime import date, datetime
 from openpyxl import load_workbook
+from openpyxl.utils import column_index_from_string
 
 # ==============================
 # Config
 # ==============================
-DEFAULT_EXCEL  = "mimamuni sales datta+.xlsx"
-DEFAULT_SHEET  = "Sheet1"
-CAT_SHEET      = "Catalogo"
+EXCEL_FILE    = "mimamuni sales datta+.xlsx"
+TARGET_SHEET  = "Sheet1"
+CAT_SHEET     = "Catalogo"
+
+# Force "Nombre del Artículo" to column D
+FORCE_ARTICULO_COLUMN_LETTER = "D"
+FORCE_ARTICULO_COL = column_index_from_string(FORCE_ARTICULO_COLUMN_LETTER)
 
 EXPECTED = ["Fecha","Cantidad","Nombre del Artículo","Método de Pago","Precio Unitario","Venta Total","Comentarios"]
 
@@ -31,61 +36,61 @@ button[kind="secondary"]{border-radius:16px;padding:16px 12px;min-height:80px;wh
 """, unsafe_allow_html=True)
 
 st.title("🛍️ Registro de Ventas")
-st.caption("Catálogo editable • Tiles rápidos • Guarda en la tabla de Sheet1 (VENTAS DIARIAS).")
+st.caption("Crea/edita artículos → elige con un clic → guarda en tu Excel (columna D para ‘Nombre del Artículo’).")
 
 # ==============================
-# Utilidades
+# Helpers
 # ==============================
+def ensure_excel_exists() -> bool:
+    return os.path.exists(EXCEL_FILE)
+
+def open_wb():
+    if not ensure_excel_exists():
+        raise FileNotFoundError("Excel no encontrado. Sube tu archivo arriba.")
+    return load_workbook(EXCEL_FILE)
+
+def write_sheet_replace(df: pd.DataFrame, sheet_name: str):
+    """Replace a sheet with df (create if missing)."""
+    from openpyxl.utils.dataframe import dataframe_to_rows
+    wb = open_wb()
+    if sheet_name in wb.sheetnames:
+        wb.remove(wb[sheet_name])
+    ws = wb.create_sheet(sheet_name)
+    for r in dataframe_to_rows(df, index=False, header=True):
+        ws.append(r)
+    wb.save(EXCEL_FILE)
+
 def canon(s: str) -> str:
-    """Normaliza: sin acentos, colapsa espacios (incluye NBSP), minúsculas."""
+    """Normalize: remove accents, collapse spaces (incl NBSP), lowercase."""
     if s is None: return ""
-    s = str(s)
-    s = s.replace("\u00A0", " ")            # NBSP → espacio normal
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = str(s).replace("\u00A0", " ")
+    s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
 HEADER_SYNONYMS = {
-    "fecha": "Fecha",
-    "cantidad": "Cantidad",
-    "nombre del articulo": "Nombre del Artículo",
-    "nombre del artículo": "Nombre del Artículo",
-    "articulo": "Nombre del Artículo",
-    "artículo": "Nombre del Artículo",
-    "producto": "Nombre del Artículo",
-    "descripcion": "Nombre del Artículo",
-    "descripción": "Nombre del Artículo",
-    "metodo de pago": "Método de Pago",
-    "metodo pago": "Método de Pago",
-    "medio de pago": "Método de Pago",
-    "precio unitario": "Precio Unitario",
-    "venta total": "Venta Total",
-    "comentarios": "Comentarios",
-    "comentario": "Comentarios",
+    "fecha":"Fecha",
+    "cantidad":"Cantidad",
+    "nombre del articulo":"Nombre del Artículo",
+    "nombre del artículo":"Nombre del Artículo",
+    "articulo":"Nombre del Artículo",
+    "artículo":"Nombre del Artículo",
+    "producto":"Nombre del Artículo",
+    "descripcion":"Nombre del Artículo",
+    "descripción":"Nombre del Artículo",
+    "metodo de pago":"Método de Pago",
+    "metodo pago":"Método de Pago",
+    "precio unitario":"Precio Unitario",
+    "venta total":"Venta Total",
+    "comentarios":"Comentarios",
+    "comentario":"Comentarios",
 }
 
-def ensure_excel(path: str) -> bool:
-    return os.path.exists(path)
-
-def open_wb(path: str):
-    if not ensure_excel(path):
-        raise FileNotFoundError("Excel no encontrado. Sube tu archivo primero.")
-    return load_workbook(path)
-
-def sheet_headers(path: str, sheet_name: str, max_cols: int = 60, header_row_hint: int | None = None):
-    """Devuelve (header_row, lista_de_encabezados_raw) detectando la fila de cabeceras."""
-    wb = open_wb(path)
-    ws = wb[sheet_name]
+def detect_headers(ws, max_cols: int = 60):
+    """Return (header_row, raw_headers_list) by scanning for Fecha/Cantidad/Nombre..."""
     max_rows = min(ws.max_row, 300)
-
     def row_vals(r: int):
         return [ws.cell(r, c).value for c in range(1, max_cols+1)]
-
-    # Si el usuario forzó fila, úsala
-    if header_row_hint and 1 <= header_row_hint <= ws.max_row:
-        return header_row_hint, row_vals(header_row_hint)
-
-    # Autodetección: buscamos una fila que contenga al menos fecha, cantidad y nombre del artículo (canónicos)
     for r in range(1, max_rows+1):
         vals = row_vals(r)
         can = [canon(v) for v in vals]
@@ -94,161 +99,132 @@ def sheet_headers(path: str, sheet_name: str, max_cols: int = 60, header_row_hin
     return None, []
 
 def build_col_map(headers_raw):
-    """Construye el mapa estándar -> índice_columna usando sinónimos tolerantes."""
-    col_map = {}
+    """Map standard headers -> column index; later we override 'Nombre del Artículo' to D."""
+    cmap = {}
     for idx, h in enumerate(headers_raw, start=1):
         std = HEADER_SYNONYMS.get(canon(h))
         if std in EXPECTED:
-            col_map[std] = idx
-    return col_map
+            cmap[std] = idx
+    return cmap
 
-def next_row_by_fecha(path: str, sheet_name: str, header_row: int, col_map: dict):
-    wb = open_wb(path)
-    ws = wb[sheet_name]
-    if "Fecha" not in col_map:
-        raise RuntimeError("No se encontró la columna 'Fecha' en la tabla.")
+def next_row_by_fecha(ws, header_row: int, fecha_col: int):
+    """Append under the last row where Fecha has a value; ignores other placeholders."""
     r = header_row + 1
     last = header_row
     while r <= ws.max_row:
-        if ws.cell(r, col_map["Fecha"]).value not in (None, ""):
+        if ws.cell(r, fecha_col).value not in (None, ""):
             last = r
             r += 1
         else:
             break
     return last + 1
 
-def append_row(path: str, sheet_name: str, header_row: int, col_map: dict, row_dict: dict):
-    wb = open_wb(path)
-    ws = wb[sheet_name]
+def append_sale_to_sheet(row: dict) -> dict:
+    """Append sale into TARGET_SHEET. Forces 'Nombre del Artículo' to column D."""
+    wb = open_wb()
+    if TARGET_SHEET not in wb.sheetnames:
+        raise ValueError(f"No se encontró la hoja '{TARGET_SHEET}'.")
+    ws = wb[TARGET_SHEET]
 
-    # calcular Venta Total si falta
-    if "Venta Total" in col_map and (row_dict.get("Venta Total") in (None, "")):
+    # Detect header row and map columns
+    hr, headers_raw = detect_headers(ws)
+    if not hr:
+        raise RuntimeError("No se detectó la fila de cabeceras (Fecha/Cantidad/Nombre...).")
+    cmap = build_col_map(headers_raw)
+
+    # Force Nombre del Artículo -> column D (index 4)
+    cmap["Nombre del Artículo"] = FORCE_ARTICULO_COL
+
+    if "Fecha" not in cmap:
+        raise RuntimeError("No se encontró la columna 'Fecha' en la tabla.")
+
+    write_row = next_row_by_fecha(ws, hr, cmap["Fecha"])
+
+    # Auto-calc Venta Total if needed
+    if "Venta Total" in cmap and (row.get("Venta Total") in (None, "")):
         try:
-            row_dict["Venta Total"] = float(row_dict.get("Cantidad", 0)) * float(row_dict.get("Precio Unitario", 0))
+            row["Venta Total"] = float(row.get("Cantidad",0)) * float(row.get("Precio Unitario",0))
         except Exception:
-            row_dict["Venta Total"] = None
+            row["Venta Total"] = None
 
-    r = next_row_by_fecha(path, sheet_name, header_row, col_map)
-
-    for std, col in col_map.items():
-        v = row_dict.get(std, None)
-        if std == "Nombre del Artículo" and v is not None:
-            v = str(v)  # aseguramos string
-        if std == "Fecha" and isinstance(v, (date, datetime)):
-            ws.cell(r, col).value = datetime.combine(v, datetime.min.time())
+    # Write only known columns (with forced D for Nombre del Artículo)
+    for std, col in cmap.items():
+        val = row.get(std, None)
+        if std == "Nombre del Artículo" and val is not None:
+            val = str(val)  # ensure text
+        if std == "Fecha" and isinstance(val, (date, datetime)):
+            ws.cell(write_row, col).value = datetime.combine(val, datetime.min.time())
         else:
-            ws.cell(r, col).value = v
+            ws.cell(write_row, col).value = val
 
-    wb.save(path)
-    return r
+    wb.save(EXCEL_FILE)
+    return {"header_row": hr, "written_row": write_row, "columns_used": cmap}
 
-def write_sheet_replace(path: str, df: pd.DataFrame, sheet_name: str):
-    from openpyxl.utils.dataframe import dataframe_to_rows
-    wb = open_wb(path)
-    if sheet_name in wb.sheetnames:
-        wb.remove(wb[sheet_name])
-    ws = wb.create_sheet(sheet_name)
-    for row in dataframe_to_rows(df, index=False, header=True):
-        ws.append(row)
-    wb.save(path)
-
-# ==============================
-# Cargar/seleccionar Excel
-# ==============================
-if "excel_path" not in st.session_state:
-    st.session_state.excel_path = DEFAULT_EXCEL
-
-uploaded = st.file_uploader("📂 Sube tu Excel (.xlsx). Se guardará en esa tabla de Sheet1.", type=["xlsx"])
-if uploaded is not None:
-    st.session_state.excel_path = uploaded.name
-    with open(st.session_state.excel_path, "wb") as f:
-        f.write(uploaded.getbuffer())
-    st.success(f"Excel guardado como: {st.session_state.excel_path}")
-    st.cache_data.clear()
-
-excel_path = st.session_state.excel_path
-
-if ensure_excel(excel_path):
-    wb = open_wb(excel_path)
-    sheets = wb.sheetnames
-    target_sheet = st.selectbox("Hoja de destino (donde está VENTAS DIARIAS)", sheets,
-                                index=sheets.index(DEFAULT_SHEET) if DEFAULT_SHEET in sheets else 0)
-else:
-    st.info("Aún no has subido el archivo; se usará el nombre por defecto si existe.")
-    target_sheet = DEFAULT_SHEET
-
-# ==============================
-# Diagnóstico de cabeceras
-# ==============================
-st.divider()
-st.subheader("🛠️ Diagnóstico de cabeceras (por si 'Nombre del Artículo' no aparece en el Excel)")
-header_row_hint = st.number_input("Fila de cabeceras (0 = detectar automático)", min_value=0, value=0, step=1)
-forced = header_row_hint if header_row_hint > 0 else None
-
-if ensure_excel(excel_path) and target_sheet in open_wb(excel_path).sheetnames:
-    hr, headers_raw = sheet_headers(excel_path, target_sheet, header_row_hint=forced)
-    col_map = build_col_map(headers_raw)
-    st.caption(f"Fila detectada: **{hr}** | Encabezados: { [h for h in headers_raw if h not in (None,'')] }")
-    # Si falta 'Nombre del Artículo', permitimos override manual
-    if "Nombre del Artículo" not in col_map and headers_raw:
-        opciones = [h for h in headers_raw if h not in (None, "")]
-        override = st.selectbox("Selecciona columna para 'Nombre del Artículo' (si no se detectó):", opciones)
-        if override:
-            # inyectamos override
-            idx = headers_raw.index(override) + 1
-            col_map["Nombre del Artículo"] = idx
-            st.info(f"Usando override: 'Nombre del Artículo' → columna {idx}")
-else:
-    hr, col_map = None, {}
-
-# ==============================
-# Catálogo (CRUD persistente)
-# ==============================
-st.divider()
-st.subheader("🗂️ Catálogo (añadir / editar / borrar)")
-
-def load_catalog_df(path: str) -> pd.DataFrame:
-    if not ensure_excel(path):
+@st.cache_data(show_spinner=False)
+def load_catalog_df() -> pd.DataFrame:
+    if not ensure_excel_exists():
         return pd.DataFrame(DEFAULT_CATALOG, columns=["Artículo","Precio"])
     try:
-        df = pd.read_excel(path, sheet_name=CAT_SHEET)
+        df = pd.read_excel(EXCEL_FILE, sheet_name=CAT_SHEET)
         df = df.rename(columns={"Articulo":"Artículo","precio":"Precio"})
         df["Artículo"] = df["Artículo"].astype(str)
         df["Precio"]   = pd.to_numeric(df["Precio"], errors="coerce").fillna(0.0)
         return df[["Artículo","Precio"]]
     except Exception:
         df = pd.DataFrame(DEFAULT_CATALOG, columns=["Artículo","Precio"])
-        try: write_sheet_replace(path, df, CAT_SHEET)
+        try: write_sheet_replace(df, CAT_SHEET)
         except Exception: pass
         return df
 
-def save_catalog_df(path: str, df: pd.DataFrame):
+def save_catalog_df(df: pd.DataFrame):
     clean = df.copy()
-    clean["Artículo"] = clean["Artículo"].astype(str).strip()
+    clean["Artículo"] = clean["Artículo"].astype(str).str.strip()
     clean["Precio"]   = pd.to_numeric(clean["Precio"], errors="coerce").fillna(0.0)
     clean = clean[clean["Artículo"]!=""].drop_duplicates(subset=["Artículo"], keep="last")
-    write_sheet_replace(path, clean[["Artículo","Precio"]], CAT_SHEET)
+    write_sheet_replace(clean[["Artículo","Precio"]], CAT_SHEET)
 
-cat = load_catalog_df(excel_path)
-if "Eliminar" not in cat.columns: cat["Eliminar"] = False
+# ==============================
+# Upload / Download
+# ==============================
+st.subheader("📂 Tu archivo Excel")
+up = st.file_uploader("Sube tu Excel (.xlsx). Las ventas se guardarán en la tabla de Sheet1.", type=["xlsx"])
+if up is not None:
+    with open(EXCEL_FILE, "wb") as f: f.write(up.getbuffer())
+    st.success("Excel guardado.")
+    st.cache_data.clear()
+if ensure_excel_exists():
+    with open(EXCEL_FILE, "rb") as f:
+        st.download_button("⬇️ Descargar Excel actualizado", f, file_name=EXCEL_FILE,
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+else:
+    st.info("Aún no has subido el archivo.")
+
+# ==============================
+# Catálogo CRUD (persistente)
+# ==============================
+st.divider()
+st.subheader("🗂️ Catálogo (añadir / editar / borrar)")
+cat_df = load_catalog_df()
+if "Eliminar" not in cat_df.columns:
+    cat_df["Eliminar"] = False
 
 edited = st.data_editor(
-    cat, num_rows="dynamic", hide_index=True, use_container_width=True,
+    cat_df, num_rows="dynamic", hide_index=True, use_container_width=True,
     column_config={
         "Artículo": st.column_config.TextColumn(required=True),
         "Precio":   st.column_config.NumberColumn(min_value=0.0, step=1.0, format="%.2f"),
-        "Eliminar": st.column_config.CheckboxColumn(help="Marca para borrar esta fila")
+        "Eliminar": st.column_config.CheckboxColumn(help="Marca para borrar esta fila"),
     },
     key="catalog_editor"
 )
 
 c1, c2 = st.columns([1,1])
 with c1:
-    if st.button("💾 Guardar catálogo", use_container_width=True, disabled=not ensure_excel(excel_path)):
+    if st.button("💾 Guardar catálogo", use_container_width=True, disabled=not ensure_excel_exists()):
         to_save = edited.copy()
         if "Eliminar" in to_save:
             to_save = to_save[to_save["Eliminar"]==False].drop(columns=["Eliminar"])
-        save_catalog_df(excel_path, to_save)
+        save_catalog_df(to_save)
         st.success("Catálogo guardado en 'Catalogo'.")
         st.cache_data.clear(); st.rerun()
 with c2:
@@ -256,98 +232,71 @@ with c2:
         st.cache_data.clear(); st.rerun()
 
 # ==============================
-# Tiles (ELIGE UN ARTÍCULO)
+# Tiles (ELIGE UN ARTÍCULO) — clicking fills the form
 # ==============================
 st.divider()
 st.subheader("🧱 ELIGE UN ARTÍCULO")
-tiles = load_catalog_df(excel_path).sort_values("Artículo").reset_index(drop=True)
-busca = st.text_input("Buscar artículo", placeholder="escribe para filtrar…")
-if busca: tiles = tiles[tiles["Artículo"].str.contains(busca, case=False, na=False)]
+tiles = load_catalog_df().sort_values("Artículo").reset_index(drop=True)
 
-if "articulo_sel" not in st.session_state: st.session_state.articulo_sel = ""
+# keep form fields in session so tiles can fill them
+if "nombre_input" not in st.session_state: st.session_state.nombre_input = ""
 if "precio_sel"   not in st.session_state: st.session_state.precio_sel   = 0.0
 
+search = st.text_input("Buscar artículo", placeholder="escribe para filtrar…")
+if search:
+    tiles = tiles[tiles["Artículo"].str.contains(search, case=False, na=False)]
+
 per_row = 4
-items = list(tiles.itertuples(index=False, name=None))
+items = list(tiles.itertuples(index=False, name=None))  # [(Artículo, Precio)]
 for i in range(0, len(items), per_row):
     cols = st.columns(per_row)
     for col, (name, price) in zip(cols, items[i:i+per_row]):
         with col:
             if st.button(f"{name}\n${float(price):.2f}", key=f"tile_{name}", use_container_width=True):
-                st.session_state.articulo_sel = name
+                # ✅ Clicking a tile fills the form immediately
+                st.session_state.nombre_input = name
                 st.session_state.precio_sel   = float(price)
 
+# quick add
 with st.expander("➕ Añadir artículo rápido", expanded=False):
     q1, q2, q3 = st.columns([2,1,1])
     with q1: qa_name = st.text_input("Nombre", key="qa_name")
     with q2: qa_price = st.number_input("Precio", min_value=0.0, step=1.0, value=0.0, format="%.2f", key="qa_price")
     with q3:
-        if st.button("Guardar", use_container_width=True, key="qa_btn", disabled=not ensure_excel(excel_path)):
-            dfc = load_catalog_df(excel_path)
+        if st.button("Guardar", use_container_width=True, key="qa_btn", disabled=not ensure_excel_exists()):
+            dfc = load_catalog_df()
             mask = dfc["Artículo"].str.lower().eq((qa_name or "").strip().lower())
             if mask.any():
                 dfc.loc[mask, "Precio"] = float(qa_price)
             else:
                 dfc = pd.concat([dfc, pd.DataFrame([{"Artículo": (qa_name or "").strip(), "Precio": float(qa_price)}])], ignore_index=True)
-            save_catalog_df(excel_path, dfc)
+            save_catalog_df(dfc)
             st.success(f"Guardado: {qa_name} → {float(qa_price):.2f}")
             st.cache_data.clear(); st.rerun()
 
 # ==============================
-# Formulario de venta
+# Formulario de venta (Nombre se rellena con el tile)
 # ==============================
 st.divider()
-st.subheader("🧾 Guardar venta en tu tabla de Sheet1")
+st.subheader("🧾 Guardar venta (Nombre va a la columna D)")
 
 left, right = st.columns(2)
 with left:
     fecha    = st.date_input("Fecha", value=date.today())
     cantidad = st.number_input("Cantidad", min_value=1, step=1, value=1)
-    articulo = st.text_input("Nombre del Artículo", value=st.session_state.articulo_sel)
+    # ✅ This field is driven by the tiles via session_state
+    articulo = st.text_input("Nombre del Artículo", key="nombre_input")
 with right:
     metodo      = st.radio("Método de Pago", ["E","T"], horizontal=True)
     precio_unit = st.number_input("Precio Unitario", min_value=0.0, step=1.0, value=float(st.session_state.precio_sel), format="%.2f")
     venta_total = st.number_input("Venta Total (auto)", min_value=0.0, step=1.0, value=float(cantidad)*float(precio_unit), format="%.2f")
 comentarios = st.text_area("Comentarios (opcional)")
 
-disabled = (not ensure_excel(excel_path)) or (not articulo) or (precio_unit <= 0)
-debug_box = st.empty()
-
-# Botón de prueba (muestra dónde escribiría y aplica el override si lo definiste)
-if st.button("🧪 Probar ubicación (no modifica nada)", use_container_width=True, disabled=not ensure_excel(excel_path)):
-    try:
-        hr, headers_raw = sheet_headers(excel_path, target_sheet, header_row_hint=forced)
-        if not hr: raise RuntimeError("No se detectó la fila de cabeceras.")
-        cmap = build_col_map(headers_raw)
-        # override manual si el usuario lo definió
-        if "Nombre del Artículo" not in cmap and headers_raw:
-            opciones = [h for h in headers_raw if h not in (None, "")]
-            # si el usuario ya eligió en el selectbox, estará en la sesión
-            chosen = st.session_state.get("Nombre_Override")
-        else:
-            chosen = None
-        if chosen and chosen in headers_raw:
-            cmap["Nombre del Artículo"] = headers_raw.index(chosen) + 1
-        r = next_row_by_fecha(excel_path, target_sheet, hr, cmap)
-        debug_box.info(f"Cabeceras en fila {hr}. Escribiría en fila **{r}**. Columnas usadas: {list(cmap.keys())}")
-    except Exception as e:
-        st.error(f"Prueba falló: {e}")
+disabled = (not ensure_excel_exists()) or (not articulo) or (precio_unit <= 0)
 
 if st.button("💾 Guardar venta", type="primary", use_container_width=True, disabled=disabled):
     try:
-        hr, headers_raw = sheet_headers(excel_path, target_sheet, header_row_hint=forced)
-        if not hr: raise RuntimeError("No se detectó la fila de cabeceras.")
-        cmap = build_col_map(headers_raw)
-        # override manual: guarda la elección del usuario (si existe selectbox arriba)
-        # Para simplificar, volvemos a calcular aquí:
-        if "Nombre del Artículo" not in cmap and headers_raw:
-            # intenta heurística: busca la primera cabecera que contenga "nombre" y "art"
-            for idx, h in enumerate(headers_raw, start=1):
-                c = canon(h)
-                if "nombre" in c and ("art" in c or "prod" in c or "descr" in c):
-                    cmap["Nombre del Artículo"] = idx
-                    break
-        new_row = {
+        info = append_sale_to_sheet({
             "Fecha": fecha,
             "Cantidad": int(cantidad),
             "Nombre del Artículo": (articulo or "").strip(),
@@ -355,26 +304,14 @@ if st.button("💾 Guardar venta", type="primary", use_container_width=True, dis
             "Precio Unitario": float(precio_unit),
             "Venta Total": float(venta_total),
             "Comentarios": (comentarios or "").strip() or None,
-        }
-        written_row = append_row(excel_path, target_sheet, hr, cmap, new_row)
-        st.success(f"✅ Venta guardada en fila {written_row}.")
+        })
+        st.success("✅ Venta guardada. (Nombre del Artículo → columna D)")
+        st.info(f"Cabeceras fila {info['header_row']} → escrita en fila **{info['written_row']}**. Col D forzada.")
         st.balloons()
-        st.session_state.articulo_sel = ""
-        st.session_state.precio_sel   = 0.0
+        # clear for next
+        st.session_state.nombre_input = ""
+        st.session_state.precio_sel = 0.0
         st.cache_data.clear()
     except Exception as e:
         st.error(f"No se pudo escribir: {e}")
 
-# Vista rápida
-with st.expander("📊 Vista rápida (lectura de tu tabla)"):
-    try:
-        df_view = pd.read_excel(excel_path, sheet_name=target_sheet, header=None)
-        st.dataframe(df_view, use_container_width=True, hide_index=True)
-    except Exception:
-        pass
-
-# Descargar
-if ensure_excel(excel_path):
-    with open(excel_path, "rb") as f:
-        st.download_button("⬇️ Descargar Excel actualizado", f, file_name=os.path.basename(excel_path),
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
