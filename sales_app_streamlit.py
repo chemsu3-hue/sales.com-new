@@ -5,6 +5,9 @@ import os, unicodedata
 from datetime import date, datetime
 from openpyxl import load_workbook
 
+# ===================================
+# Config
+# ===================================
 EXCEL_FILE   = "mimamuni sales datta+.xlsx"   # your workbook name
 TARGET_SHEET = "Sheet1"                       # where VENTAS DIARIAS lives
 CAT_SHEET    = "Catalogo"                     # persistent catalog (Artículo, Precio)
@@ -18,7 +21,7 @@ DEFAULT_CATALOG = [
     {"Artículo":"cinturón","Precio":20.0},
 ]
 
-# ---------- polish ----------
+# ============= styling =============
 st.set_page_config(page_title="Ventas - Tienda de Ropa", page_icon="🛍️", layout="wide")
 st.markdown("""
 <style>
@@ -28,9 +31,11 @@ button[kind="secondary"]{border-radius:16px;padding:16px 12px;min-height:80px;wh
 """, unsafe_allow_html=True)
 
 st.title("🛍️ Registro de Ventas")
-st.caption("Crea/edita artículos → elige con un clic → guarda la venta en la tabla principal de Sheet1.")
+st.caption("Crea/edita artículos → elige con un clic → guarda la venta en la tabla principal de Sheet1 (VENTAS DIARIAS).")
 
-# ---------- helpers ----------
+# ===================================
+# Helpers
+# ===================================
 def ensure_excel_exists() -> bool:
     return os.path.exists(EXCEL_FILE)
 
@@ -56,6 +61,7 @@ def strip_accents_lower(s:str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
     return s.strip().lower()
 
+# tolerant header mapping
 HEADER_SYNONYMS = {
     "fecha":"Fecha",
     "cantidad":"Cantidad",
@@ -121,7 +127,7 @@ def find_next_row_by_fecha(ws, header_row, fecha_col):
     last = header_row
     while r <= ws.max_row:
         val = ws.cell(r, fecha_col).value
-        if val not in (None, ""):  # anything in Fecha counts as filled
+        if val not in (None, ""):
             last = r
             r += 1
         else:
@@ -183,7 +189,9 @@ def read_current_table() -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=EXPECTED)
 
-# ================= Upload / Download =================
+# ===================================
+# Upload / Download
+# ===================================
 with st.container():
     st.subheader("📂 Tu archivo Excel")
     up = st.file_uploader("Sube tu Excel (.xlsx). Las ventas se guardarán en la tabla de Sheet1 (VENTAS DIARIAS).", type=["xlsx"])
@@ -198,7 +206,9 @@ with st.container():
     else:
         st.info("Aún no has subido el archivo.")
 
-# ================= Catalog: CRUD (persists to Excel) =================
+# ===================================
+# Catalog: CRUD (persists to Excel)
+# ===================================
 st.divider()
 st.subheader("🗂️ Catálogo (añadir / editar / borrar)")
 cat_df = load_catalog_df()
@@ -229,7 +239,9 @@ with right:
     if st.button("↩️ Deshacer cambios", use_container_width=True):
         st.cache_data.clear(); st.rerun()
 
-# ================= Tiles from saved catalog =================
+# ===================================
+# Tiles from saved catalog (FIXED)
+# ===================================
 st.divider()
 st.subheader("🧱 ELIGE UN ARTÍCULO")
 tiles = load_catalog_df().sort_values("Artículo").reset_index(drop=True)
@@ -237,13 +249,15 @@ search = st.text_input("Buscar artículo", placeholder="escribe para filtrar…"
 if search:
     tiles = tiles[tiles["Artículo"].str.contains(search, case=False, na=False)]
 
+# prepare session state
 if "articulo_sel" not in st.session_state: st.session_state.articulo_sel = ""
 if "precio_sel"   not in st.session_state: st.session_state.precio_sel   = 0.0
 
 per_row = 4
-for i in range(0, len(tiles), per_row):
+items = list(tiles.itertuples(index=False, name=None))  # [(Artículo, Precio), ...]  <-- iterator -> list (fix)
+for i in range(0, len(items), per_row):
     cols = st.columns(per_row)
-    for col, (name, price) in zip(cols, tiles.itertuples(index=False, name=None)[i:i+per_row]):
+    for col, (name, price) in zip(cols, items[i:i+per_row]):
         with col:
             if st.button(f"{name}\n${float(price):.2f}", key=f"tile_{name}", use_container_width=True):
                 st.session_state.articulo_sel = name
@@ -268,7 +282,9 @@ with st.expander("➕ Añadir artículo rápido al catálogo", expanded=False):
             st.success(f"Guardado en catálogo: {qa_name.strip()} → {float(qa_price):.2f}")
             st.cache_data.clear(); st.rerun()
 
-# ================= Sales form (writes into Sheet1 table) =================
+# ===================================
+# Sales form (writes into Sheet1 table)
+# ===================================
 st.divider()
 st.subheader("🧾 Guardar venta en la tabla de Sheet1 (VENTAS DIARIAS)")
 c1, c2 = st.columns(2)
@@ -307,4 +323,5 @@ if st.button("💾 Guardar venta", type="primary", use_container_width=True, dis
 
 with st.expander("📊 Vista rápida de ventas (Sheet1)"):
     st.dataframe(read_current_table(), use_container_width=True, hide_index=True)
+
 
