@@ -1,4 +1,4 @@
-# sales_app_streamlit.py — tiles fill the form + force "Nombre del Artículo" to column D
+# sales_app_streamlit.py — cute UI + tiles autofill + escribe "Nombre del Artículo" en columna D
 import streamlit as st
 import pandas as pd
 import os, unicodedata, re
@@ -13,7 +13,7 @@ EXCEL_FILE    = "mimamuni sales datta+.xlsx"
 TARGET_SHEET  = "Sheet1"
 CAT_SHEET     = "Catalogo"
 
-# Force "Nombre del Artículo" to column D
+# Forzar "Nombre del Artículo" a la columna D (índice 4)
 FORCE_ARTICULO_COLUMN_LETTER = "D"
 FORCE_ARTICULO_COL = column_index_from_string(FORCE_ARTICULO_COLUMN_LETTER)
 
@@ -27,16 +27,88 @@ DEFAULT_CATALOG = [
     {"Artículo":"cinturón","Precio":20.0},
 ]
 
+# ==============================
+# Cute styling 🎀
+# ==============================
 st.set_page_config(page_title="Ventas - Tienda de Ropa", page_icon="🛍️", layout="wide")
 st.markdown("""
 <style>
-button[kind="secondary"]{border-radius:16px;padding:16px 12px;min-height:80px;white-space:pre-line;font-weight:600}
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@500;700&display=swap');
+
+:root {
+  --brand: #7c5cff;
+  --brand-2: #ff7ac8;
+  --card-bg: #ffffff;
+  --muted: #6b7280;
+}
+
+/* Page padding */
 .block-container{padding-top:1.2rem}
+
+/* Big title with gradient */
+h1 {
+  font-family: 'Poppins', system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  font-weight: 700 !important;
+  background: linear-gradient(90deg, var(--brand), var(--brand-2));
+  -webkit-background-clip: text; background-clip: text; color: transparent !important;
+  letter-spacing: 0.3px;
+}
+
+/* Section subtitles */
+h2, .nice-title {
+  font-family: 'Poppins', system-ui, sans-serif;
+  font-weight: 600;
+  color: #1f2937;
+  margin: 0.25rem 0 0.6rem 0;
+}
+
+/* Make cards/blocks feel soft */
+div[data-testid="stVerticalBlock"] > div:has(> div > div[data-testid="stFileUploader"]) {
+  background: var(--card-bg);
+  border: 1px solid #eef2ff;
+  border-radius: 16px;
+  padding: 16px 16px 6px 16px;
+  box-shadow: 0 2px 12px rgba(124,92,255,0.08);
+}
+
+/* Data editor soft corners */
+div[data-testid="stDataFrame"] {
+  border-radius: 14px; overflow: hidden; border: 1px solid #eef2ff;
+}
+
+/* Buttons general */
+button[kind="primary"] {
+  border-radius: 12px !important;
+  padding: 10px 14px !important;
+  font-weight: 700 !important;
+}
+button[kind="secondary"] {
+  border-radius: 12px !important;
+  padding: 10px 12px !important;
+  font-weight: 600 !important;
+}
+
+/* Tile buttons (we use secondary kind for tiles) */
+.tile-grid button[kind="secondary"] {
+  min-height: 64px;
+  font-size: 0.95rem;
+  white-space: pre-line !important;
+  background: linear-gradient(135deg, #ffffff, #f7f3ff);
+  border: 1px solid #e9e5ff;
+  box-shadow: 0 2px 10px rgba(124,92,255,0.10);
+  transition: transform .06s ease, box-shadow .2s ease;
+}
+.tile-grid button[kind="secondary"]:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(124,92,255,0.18);
+}
+
+/* Small helper text */
+.small { color: var(--muted); font-size: 0.9rem; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🛍️ Registro de Ventas")
-st.caption("Crea/edita artículos → elige con un clic → guarda en tu Excel (columna D para ‘Nombre del Artículo’).")
+st.title("🛍️ Ventas — Tienda de Ropa")
 
 # ==============================
 # Helpers
@@ -50,7 +122,7 @@ def open_wb():
     return load_workbook(EXCEL_FILE)
 
 def write_sheet_replace(df: pd.DataFrame, sheet_name: str):
-    """Replace a sheet with df (create if missing)."""
+    """Reemplaza/crea una hoja con el contenido de df."""
     from openpyxl.utils.dataframe import dataframe_to_rows
     wb = open_wb()
     if sheet_name in wb.sheetnames:
@@ -61,7 +133,7 @@ def write_sheet_replace(df: pd.DataFrame, sheet_name: str):
     wb.save(EXCEL_FILE)
 
 def canon(s: str) -> str:
-    """Normalize: remove accents, collapse spaces (incl NBSP), lowercase."""
+    """Normaliza: sin acentos, espacios colapsados, minúsculas."""
     if s is None: return ""
     s = str(s).replace("\u00A0", " ")
     s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
@@ -87,7 +159,7 @@ HEADER_SYNONYMS = {
 }
 
 def detect_headers(ws, max_cols: int = 60):
-    """Return (header_row, raw_headers_list) by scanning for Fecha/Cantidad/Nombre..."""
+    """Devuelve (fila_cabecera, lista_cabeceras_raw) detectando por Fecha/Cantidad/Nombre Artículo."""
     max_rows = min(ws.max_row, 300)
     def row_vals(r: int):
         return [ws.cell(r, c).value for c in range(1, max_cols+1)]
@@ -99,7 +171,7 @@ def detect_headers(ws, max_cols: int = 60):
     return None, []
 
 def build_col_map(headers_raw):
-    """Map standard headers -> column index; later we override 'Nombre del Artículo' to D."""
+    """Mapa estándar -> índice columna. Luego forzamos Artículo a D."""
     cmap = {}
     for idx, h in enumerate(headers_raw, start=1):
         std = HEADER_SYNONYMS.get(canon(h))
@@ -108,50 +180,45 @@ def build_col_map(headers_raw):
     return cmap
 
 def next_row_by_fecha(ws, header_row: int, fecha_col: int):
-    """Append under the last row where Fecha has a value; ignores other placeholders."""
+    """Primera fila vacía bajo la última con Fecha."""
     r = header_row + 1
     last = header_row
     while r <= ws.max_row:
         if ws.cell(r, fecha_col).value not in (None, ""):
-            last = r
-            r += 1
+            last = r; r += 1
         else:
             break
     return last + 1
 
 def append_sale_to_sheet(row: dict) -> dict:
-    """Append sale into TARGET_SHEET. Forces 'Nombre del Artículo' to column D."""
+    """Escribe la venta en TARGET_SHEET. 'Nombre del Artículo' SIEMPRE en columna D."""
     wb = open_wb()
     if TARGET_SHEET not in wb.sheetnames:
         raise ValueError(f"No se encontró la hoja '{TARGET_SHEET}'.")
     ws = wb[TARGET_SHEET]
 
-    # Detect header row and map columns
     hr, headers_raw = detect_headers(ws)
     if not hr:
         raise RuntimeError("No se detectó la fila de cabeceras (Fecha/Cantidad/Nombre...).")
     cmap = build_col_map(headers_raw)
 
-    # Force Nombre del Artículo -> column D (index 4)
+    # Forzar Artículo -> columna D
     cmap["Nombre del Artículo"] = FORCE_ARTICULO_COL
 
     if "Fecha" not in cmap:
         raise RuntimeError("No se encontró la columna 'Fecha' en la tabla.")
-
     write_row = next_row_by_fecha(ws, hr, cmap["Fecha"])
 
-    # Auto-calc Venta Total if needed
+    # Venta Total auto si falta
     if "Venta Total" in cmap and (row.get("Venta Total") in (None, "")):
-        try:
-            row["Venta Total"] = float(row.get("Cantidad",0)) * float(row.get("Precio Unitario",0))
-        except Exception:
-            row["Venta Total"] = None
+        try: row["Venta Total"] = float(row.get("Cantidad",0)) * float(row.get("Precio Unitario",0))
+        except Exception: row["Venta Total"] = None
 
-    # Write only known columns (with forced D for Nombre del Artículo)
+    # Escribir solo columnas conocidas (con D forzada para Artículo)
     for std, col in cmap.items():
         val = row.get(std, None)
         if std == "Nombre del Artículo" and val is not None:
-            val = str(val)  # ensure text
+            val = str(val)
         if std == "Fecha" and isinstance(val, (date, datetime)):
             ws.cell(write_row, col).value = datetime.combine(val, datetime.min.time())
         else:
@@ -184,14 +251,15 @@ def save_catalog_df(df: pd.DataFrame):
     write_sheet_replace(clean[["Artículo","Precio"]], CAT_SHEET)
 
 # ==============================
-# Upload / Download
+# 1) Excel subir/descargar
 # ==============================
-st.subheader("📂 Tu archivo Excel")
-up = st.file_uploader("Sube tu Excel (.xlsx). Las ventas se guardarán en la tabla de Sheet1.", type=["xlsx"])
+st.markdown("### 📂 Archivo Excel")
+up = st.file_uploader("Sube tu Excel (.xlsx). Se guardará en la tabla de Sheet1 (VENTAS DIARIAS).", type=["xlsx"])
 if up is not None:
     with open(EXCEL_FILE, "wb") as f: f.write(up.getbuffer())
     st.success("Excel guardado.")
     st.cache_data.clear()
+
 if ensure_excel_exists():
     with open(EXCEL_FILE, "rb") as f:
         st.download_button("⬇️ Descargar Excel actualizado", f, file_name=EXCEL_FILE,
@@ -200,10 +268,12 @@ else:
     st.info("Aún no has subido el archivo.")
 
 # ==============================
-# Catálogo CRUD (persistente)
+# 2) Catálogo CRUD (persistente)
 # ==============================
 st.divider()
-st.subheader("🗂️ Catálogo (añadir / editar / borrar)")
+st.markdown("### 🗂️ Catálogo de artículos")
+st.markdown("<span class='small'>Añade, edita o borra. Se guarda en la hoja ‘Catalogo’ del mismo Excel.</span>", unsafe_allow_html=True)
+
 cat_df = load_catalog_df()
 if "Eliminar" not in cat_df.columns:
     cat_df["Eliminar"] = False
@@ -225,39 +295,45 @@ with c1:
         if "Eliminar" in to_save:
             to_save = to_save[to_save["Eliminar"]==False].drop(columns=["Eliminar"])
         save_catalog_df(to_save)
-        st.success("Catálogo guardado en 'Catalogo'.")
+        st.success("Catálogo guardado en ‘Catalogo’.")
         st.cache_data.clear(); st.rerun()
 with c2:
     if st.button("↩️ Deshacer cambios", use_container_width=True):
         st.cache_data.clear(); st.rerun()
 
 # ==============================
-# Tiles (ELIGE UN ARTÍCULO) — clicking fills the form
+# 3) Tiles (ELIGE UN ARTÍCULO) — más pequeños y bonitos
 # ==============================
 st.divider()
-st.subheader("🧱 ELIGE UN ARTÍCULO")
+st.markdown("### 🧱 Elige un artículo")
+st.markdown("<span class='small'>Clic en un tile → rellena automáticamente el formulario de venta.</span>", unsafe_allow_html=True)
+
 tiles = load_catalog_df().sort_values("Artículo").reset_index(drop=True)
 
-# keep form fields in session so tiles can fill them
+# Estado para el formulario
 if "nombre_input" not in st.session_state: st.session_state.nombre_input = ""
 if "precio_sel"   not in st.session_state: st.session_state.precio_sel   = 0.0
 
-search = st.text_input("Buscar artículo", placeholder="escribe para filtrar…")
+# Búsqueda
+search = st.text_input("🔎 Buscar", placeholder="Escribe para filtrar…", label_visibility="collapsed")
 if search:
     tiles = tiles[tiles["Artículo"].str.contains(search, case=False, na=False)]
 
-per_row = 4
+# Grid de tiles (más pequeño): 5 por fila
+per_row = 5
 items = list(tiles.itertuples(index=False, name=None))  # [(Artículo, Precio)]
+st.markdown('<div class="tile-grid">', unsafe_allow_html=True)
 for i in range(0, len(items), per_row):
     cols = st.columns(per_row)
     for col, (name, price) in zip(cols, items[i:i+per_row]):
         with col:
             if st.button(f"{name}\n${float(price):.2f}", key=f"tile_{name}", use_container_width=True):
-                # ✅ Clicking a tile fills the form immediately
+                # ✅ tile click -> rellena el formulario
                 st.session_state.nombre_input = name
                 st.session_state.precio_sel   = float(price)
+st.markdown('</div>', unsafe_allow_html=True)
 
-# quick add
+# Añadir rápido (mini formulario)
 with st.expander("➕ Añadir artículo rápido", expanded=False):
     q1, q2, q3 = st.columns([2,1,1])
     with q1: qa_name = st.text_input("Nombre", key="qa_name")
@@ -275,26 +351,27 @@ with st.expander("➕ Añadir artículo rápido", expanded=False):
             st.cache_data.clear(); st.rerun()
 
 # ==============================
-# Formulario de venta (Nombre se rellena con el tile)
+# 4) Formulario de venta (cute) — escribe Artículo en columna D
 # ==============================
 st.divider()
-st.subheader("🧾 Guardar venta (Nombre va a la columna D)")
+st.markdown("### 🧾 Guardar venta")
+st.markdown("<span class='small'>“Nombre del Artículo” se escribe siempre en la <b>columna D</b> del Excel.</span>", unsafe_allow_html=True)
 
 left, right = st.columns(2)
 with left:
-    fecha    = st.date_input("Fecha", value=date.today())
-    cantidad = st.number_input("Cantidad", min_value=1, step=1, value=1)
-    # ✅ This field is driven by the tiles via session_state
-    articulo = st.text_input("Nombre del Artículo", key="nombre_input")
+    fecha    = st.date_input("📅 Fecha", value=date.today())
+    cantidad = st.number_input("🔢 Cantidad", min_value=1, step=1, value=1)
+    # ✅ este input se rellena con los tiles
+    articulo = st.text_input("🏷️ Nombre del Artículo", key="nombre_input", placeholder="p. ej., jeans slim")
 with right:
-    metodo      = st.radio("Método de Pago", ["E","T"], horizontal=True)
-    precio_unit = st.number_input("Precio Unitario", min_value=0.0, step=1.0, value=float(st.session_state.precio_sel), format="%.2f")
-    venta_total = st.number_input("Venta Total (auto)", min_value=0.0, step=1.0, value=float(cantidad)*float(precio_unit), format="%.2f")
-comentarios = st.text_area("Comentarios (opcional)")
+    metodo      = st.radio("💳 Método de Pago", ["E","T"], horizontal=True, help="E=Efectivo, T=Tarjeta")
+    precio_unit = st.number_input("💵 Precio Unitario", min_value=0.0, step=1.0, value=float(st.session_state.precio_sel), format="%.2f")
+    venta_total = st.number_input("🧮 Venta Total (auto)", min_value=0.0, step=1.0, value=float(cantidad)*float(precio_unit), format="%.2f")
+comentarios = st.text_area("📝 Comentarios (opcional)")
 
 disabled = (not ensure_excel_exists()) or (not articulo) or (precio_unit <= 0)
 
-if st.button("💾 Guardar venta", type="primary", use_container_width=True, disabled=disabled):
+if st.button("💾 Guardar venta en Excel", type="primary", use_container_width=True, disabled=disabled):
     try:
         info = append_sale_to_sheet({
             "Fecha": fecha,
@@ -305,10 +382,10 @@ if st.button("💾 Guardar venta", type="primary", use_container_width=True, dis
             "Venta Total": float(venta_total),
             "Comentarios": (comentarios or "").strip() or None,
         })
-        st.success("✅ Venta guardada. (Nombre del Artículo → columna D)")
-        st.info(f"Cabeceras fila {info['header_row']} → escrita en fila **{info['written_row']}**. Col D forzada.")
+        st.success("✅ Venta guardada (Nombre del Artículo → columna D).")
+        st.info(f"Cabeceras en fila {info['header_row']} → escrita la fila **{info['written_row']}**.")
         st.balloons()
-        # clear for next
+        # limpiar selección para el siguiente registro
         st.session_state.nombre_input = ""
         st.session_state.precio_sel = 0.0
         st.cache_data.clear()
