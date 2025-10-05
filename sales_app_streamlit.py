@@ -108,7 +108,7 @@ button[kind="secondary"] {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🛍️ Ventas — Tienda de Ropa")
+st.title("🛍️ Ventas — Tienda mimamuni")
 
 # ==============================
 # Helpers
