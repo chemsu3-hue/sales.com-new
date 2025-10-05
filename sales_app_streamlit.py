@@ -1,6 +1,6 @@
 # sales_app_streamlit.py — cute UI + tiles autofill + escribe "Nombre del Artículo" en columna D
 import streamlit as st
-import pandas as pd
+import pandas as pd 
 import os, unicodedata, re
 from datetime import date, datetime
 from openpyxl import load_workbook
