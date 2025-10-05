@@ -30,7 +30,7 @@ DEFAULT_CATALOG = [
 # ==============================
 # Cute styling 🎀
 # ==============================
-st.set_page_config(page_title="Ventas - Tienda de Ropa", page_icon="🛍️", layout="wide")
+st.set_page_config(page_title="Ventas - Tienda MIMAMUNI", page_icon="🛍️", layout="wide")
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@500;700&display=swap');
